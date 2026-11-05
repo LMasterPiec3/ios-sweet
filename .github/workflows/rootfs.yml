@@ -47,25 +47,36 @@ jobs:
         run: |
           curl -fL --retry 3 -o ipsw.ipsw "$IPSW_URL"
           python3 - <<'EOF'
-          import zipfile
+          import plistlib, zipfile
           z = zipfile.ZipFile('ipsw.ipsw')
-          wanted = {}
-          for n in z.namelist():
-              b = n.rsplit('/', 1)[-1]
-              if b in ('OS.dmg', 'SystemOS.dmg', 'AppOS.dmg') and b not in wanted:
-                  wanted[b] = n
-          assert len(wanted) == 3, f'expected OS/SystemOS/AppOS dmg, got {wanted}'
-          for b, n in wanted.items():
-              with z.open(n) as src, open(b, 'wb') as dst:
+          with z.open('BuildManifest.plist') as f:
+              bm = plistlib.load(f)
+          # component -> dmg path, preferring the Erase identities
+          paths, erase_paths = {}, {}
+          for ident in bm['BuildIdentities']:
+              info = ident.get('Info', {})
+              man = ident.get('Manifest', {})
+              tgt = erase_paths if info.get('RestoreBehavior') == 'Erase' else paths
+              for comp in ('OS', 'SystemOS', 'AppOS'):
+                  if comp in tgt:
+                      continue
+                  p = man.get(comp, {}).get('Info', {}).get('Path')
+                  if p:
+                      tgt[comp] = p
+          paths = erase_paths or paths
+          assert len(paths) == 3, f'BuildManifest mapping incomplete: {paths}'
+          print('mapping:', paths)
+          for comp, p in paths.items():
+              with z.open(p) as src, open(f'{comp}.dmg', 'wb') as dst:
                   while True:
                       chunk = src.read(1 << 24)
                       if not chunk:
                           break
                       dst.write(chunk)
-              print(f'{b} <- {n}')
+              print(f'{comp}.dmg <- {p}')
           EOF
           ls -l OS.dmg SystemOS.dmg AppOS.dmg
-          rm -f ipsw.ipsw
+          rm -f ipsw.ipsw BuildManifest.plist
 
       - name: Build the HFS+ iOS root
         run: |
