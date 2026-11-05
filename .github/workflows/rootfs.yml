@@ -37,7 +37,7 @@ jobs:
       - name: Build apfs-fuse
         run: |
           sudo apt-get install -y cmake ninja-build libfuse3-dev
-          git clone --recursive --depth 1 https://github.com/serge-1/APFS-Fuse.git /tmp/apfs-src
+          git clone --recursive --depth 1 https://github.com/sgan81/apfs-fuse.git /tmp/apfs-src
           cmake -S /tmp/apfs-src -B /tmp/apfs-src/build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/apfs-src/build -j"$(nproc)"
           sudo cp /tmp/apfs-src/build/apfs-fuse /usr/local/bin/
