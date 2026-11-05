@@ -1,0 +1,28 @@
+name: probe-linux
+on:
+  workflow_dispatch:
+
+jobs:
+  hfsplus:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Probe hfsplus availability
+        run: |
+          KVER="$(uname -r)"
+          echo "runner=${{ matrix.os }} kernel=$KVER"
+          if sudo modprobe hfsplus 2>/dev/null; then
+            echo "RESULT: hfsplus loads out of the box"
+            exit 0
+          fi
+          sudo apt-get update -q
+          if sudo apt-get install -y "linux-modules-extra-$KVER" 2>&1 | tail -2 && sudo modprobe hfsplus; then
+            echo "RESULT: hfsplus loads after linux-modules-extra install"
+          else
+            echo "RESULT: no hfsplus on ${{ matrix.os }} ($KVER)"
+            apt-cache search linux-modules-extra | grep -F "$KVER" || true
+            exit 1
+          fi
