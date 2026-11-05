@@ -23,9 +23,16 @@ jobs:
       - name: Install packages
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y hfsprogs rsync android-sdk-libsparse-utils \
-            linux-modules-extra-"$(uname -r)"
-          sudo modprobe hfsplus
+          sudo apt-get install -y hfsprogs rsync android-sdk-libsparse-utils
+          # The runner kernel may already carry hfsplus; only otherwise pull
+          # in the (version-locked) extra modules package.
+          if ! sudo modprobe hfsplus 2>/dev/null; then
+            KVER="$(uname -r)"
+            sudo apt-get install -y "linux-modules-extra-$KVER" ||
+              { echo "no linux-modules-extra-$KVER in apt"; apt-cache search linux-modules-extra | grep azure | tail -5; exit 1; }
+            sudo modprobe hfsplus
+          fi
+          echo "hfsplus: $(modinfo -F name hfsplus 2>/dev/null || echo builtin-ok)"
 
       - name: Build apfs-fuse
         run: |
