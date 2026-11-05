@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel, macos-latest]
+        os: [macos-14-intel, macos-13, macos-13-intel, macos-14-large, macos-15-xlarge]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Report image and Xcode versions
