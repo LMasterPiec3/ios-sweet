@@ -1,0 +1,89 @@
+name: rootfs
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: Apple IPSW (iPhone10,3/10,6 iOS 16.7.16 20H392)
+        default: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+      size:
+        description: HFS+ root image size (userdata must fit it)
+        default: "16G"
+
+env:
+  IPSW_URL: ${{ inputs.ipsw_url || 'https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw' }}
+  SIZE: ${{ inputs.size || '16G' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y hfsprogs rsync android-sdk-libsparse-utils \
+            linux-modules-extra-"$(uname -r)"
+          sudo modprobe hfsplus
+
+      - name: Build apfs-fuse
+        run: |
+          sudo apt-get install -y cmake ninja-build libfuse3-dev
+          git clone --recursive --depth 1 https://github.com/serge-1/APFS-Fuse.git /tmp/apfs-src
+          cmake -S /tmp/apfs-src -B /tmp/apfs-src/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/apfs-src/build -j"$(nproc)"
+          sudo cp /tmp/apfs-src/build/apfs-fuse /usr/local/bin/
+          apfs-fuse 2>&1 | head -2 || true
+
+      - name: Download IPSW and extract disk images
+        run: |
+          curl -fL --retry 3 -o ipsw.ipsw "$IPSW_URL"
+          python3 - <<'EOF'
+          import zipfile
+          z = zipfile.ZipFile('ipsw.ipsw')
+          wanted = {}
+          for n in z.namelist():
+              b = n.rsplit('/', 1)[-1]
+              if b in ('OS.dmg', 'SystemOS.dmg', 'AppOS.dmg') and b not in wanted:
+                  wanted[b] = n
+          assert len(wanted) == 3, f'expected OS/SystemOS/AppOS dmg, got {wanted}'
+          for b, n in wanted.items():
+              with z.open(n) as src, open(b, 'wb') as dst:
+                  while True:
+                      chunk = src.read(1 << 24)
+                      if not chunk:
+                          break
+                      dst.write(chunk)
+              print(f'{b} <- {n}')
+          EOF
+          ls -l OS.dmg SystemOS.dmg AppOS.dmg
+          rm -f ipsw.ipsw
+
+      - name: Build the HFS+ iOS root
+        run: |
+          bash tools/mkiosroot.sh OS.dmg SystemOS.dmg AppOS.dmg ios16-root.img "$SIZE"
+
+      - name: Apply SWEET root tweaks
+        run: |
+          sudo fsck.hfsplus -fy ios16-root.img
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
+          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          sudo umount /mnt/iosroot
+
+      - name: Convert to sparse image and package
+        run: |
+          img2simg ios16-root.img ios16-root.simg
+          ls -l ios16-root.img ios16-root.simg
+          sha256sum ios16-root.simg | tee SHA256SUMS.txt
+          gzip -6 ios16-root.simg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios16-root-simg
+          path: |
+            ios16-root.simg.gz
+            SHA256SUMS.txt
+          retention-days: 5
+          if-no-files-found: error

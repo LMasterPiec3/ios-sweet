@@ -1,0 +1,22 @@
+name: probe
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-15-intel, macos-26, macos-26-intel, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Report image and Xcode versions
+        run: |
+          sw_vers || true
+          echo "--- Xcode apps ---"
+          ls -d /Applications/Xcode*.app 2>/dev/null | sort -V || echo none
+          echo "--- selected ---"
+          xcode-select -p || true
+          xcodebuild -version 2>/dev/null || true
+          echo "--- iig ---"
+          xcrun --find iig 2>/dev/null && xcrun iig -version 2>/dev/null || true
