@@ -51,19 +51,32 @@ jobs:
           z = zipfile.ZipFile('ipsw.ipsw')
           with z.open('BuildManifest.plist') as f:
               bm = plistlib.load(f)
-          # component -> dmg path, preferring the Erase identities
-          paths, erase_paths = {}, {}
+          # collect every .dmg component of the Erase identities
+          comp_map = {}
           for ident in bm['BuildIdentities']:
-              info = ident.get('Info', {})
-              man = ident.get('Manifest', {})
-              tgt = erase_paths if info.get('RestoreBehavior') == 'Erase' else paths
-              for comp in ('OS', 'SystemOS', 'AppOS'):
-                  if comp in tgt:
-                      continue
-                  p = man.get(comp, {}).get('Info', {}).get('Path')
-                  if p:
-                      tgt[comp] = p
-          paths = erase_paths or paths
+              if ident.get('Info', {}).get('RestoreBehavior') != 'Erase':
+                  continue
+              for comp, entry in ident.get('Manifest', {}).items():
+                  p = entry.get('Info', {}).get('Path')
+                  if p and p.endswith('.dmg'):
+                      comp_map.setdefault(comp, p)
+          print('dmg components:', comp_map)
+          def classify(c):
+              if c == 'OS':
+                  return 'OS'
+              if 'SystemOS' in c:
+                  return 'SystemOS'
+              if 'AppOS' in c:
+                  return 'AppOS'
+              # iOS 14+ cryptex naming: Cryptex1,OS = SystemOS cryptex
+              if 'Cryptex' in c and c.endswith('OS'):
+                  return 'SystemOS'
+              return None
+          paths = {}
+          for c, p in sorted(comp_map.items()):
+              k = classify(c)
+              if k and k not in paths:
+                  paths[k] = p
           assert len(paths) == 3, f'BuildManifest mapping incomplete: {paths}'
           print('mapping:', paths)
           for comp, p in paths.items():
