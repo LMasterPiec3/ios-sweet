@@ -1,0 +1,120 @@
+name: rootfs
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: Apple IPSW (iPhone10,3/10,6 iOS 16.7.16 20H392)
+        default: "https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw"
+      size:
+        description: HFS+ root image size (userdata must fit it)
+        default: "16G"
+
+env:
+  IPSW_URL: ${{ inputs.ipsw_url || 'https://updates.cdn-apple.com/2025FallFCS/fullrestores/122-77006/1158E502-D76D-4226-AA06-ED5E30CD1111/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw' }}
+  SIZE: ${{ inputs.size || '16G' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y hfsprogs rsync android-sdk-libsparse-utils
+          # The runner kernel may already carry hfsplus; only otherwise pull
+          # in the (version-locked) extra modules package.
+          if ! sudo modprobe hfsplus 2>/dev/null; then
+            KVER="$(uname -r)"
+            sudo apt-get install -y "linux-modules-extra-$KVER" ||
+              { echo "no linux-modules-extra-$KVER in apt"; apt-cache search linux-modules-extra | grep azure | tail -5; exit 1; }
+            sudo modprobe hfsplus
+          fi
+          echo "hfsplus: $(modinfo -F name hfsplus 2>/dev/null || echo builtin-ok)"
+
+      - name: Build apfs-fuse
+        run: |
+          sudo apt-get install -y cmake ninja-build libfuse3-dev libbz2-dev zlib1g-dev
+          git clone --recursive --depth 1 https://github.com/sgan81/apfs-fuse.git /tmp/apfs-src
+          cmake -S /tmp/apfs-src -B /tmp/apfs-src/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/apfs-src/build -j"$(nproc)"
+          sudo cp /tmp/apfs-src/build/apfs-fuse /usr/local/bin/
+          apfs-fuse 2>&1 | head -2 || true
+
+      - name: Download IPSW and extract disk images
+        run: |
+          curl -fL --retry 3 -o ipsw.ipsw "$IPSW_URL"
+          python3 - <<'EOF'
+          import plistlib, zipfile
+          z = zipfile.ZipFile('ipsw.ipsw')
+          with z.open('BuildManifest.plist') as f:
+              bm = plistlib.load(f)
+          # collect every .dmg component of the Erase identities
+          comp_map = {}
+          for ident in bm['BuildIdentities']:
+              if ident.get('Info', {}).get('RestoreBehavior') != 'Erase':
+                  continue
+              for comp, entry in ident.get('Manifest', {}).items():
+                  p = entry.get('Info', {}).get('Path')
+                  if p and p.endswith('.dmg'):
+                      comp_map.setdefault(comp, p)
+          print('dmg components:', comp_map)
+          def classify(c):
+              if c == 'OS':
+                  return 'OS'
+              if 'SystemOS' in c:
+                  return 'SystemOS'
+              if 'AppOS' in c:
+                  return 'AppOS'
+              # iOS 14+ cryptex naming: Cryptex1,OS = SystemOS cryptex
+              if 'Cryptex' in c and c.endswith('OS'):
+                  return 'SystemOS'
+              return None
+          paths = {}
+          for c, p in sorted(comp_map.items()):
+              k = classify(c)
+              if k and k not in paths:
+                  paths[k] = p
+          assert len(paths) == 3, f'BuildManifest mapping incomplete: {paths}'
+          print('mapping:', paths)
+          for comp, p in paths.items():
+              with z.open(p) as src, open(f'{comp}.dmg', 'wb') as dst:
+                  while True:
+                      chunk = src.read(1 << 24)
+                      if not chunk:
+                          break
+                      dst.write(chunk)
+              print(f'{comp}.dmg <- {p}')
+          EOF
+          ls -l OS.dmg SystemOS.dmg AppOS.dmg
+          rm -f ipsw.ipsw BuildManifest.plist
+
+      - name: Build the HFS+ iOS root
+        run: |
+          bash tools/mkiosroot.sh OS.dmg SystemOS.dmg AppOS.dmg ios16-root.img "$SIZE"
+
+      - name: Apply SWEET root tweaks
+        run: |
+          sudo fsck.hfsplus -fy ios16-root.img
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
+          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          sudo umount /mnt/iosroot
+
+      - name: Convert to sparse image and package
+        run: |
+          img2simg ios16-root.img ios16-root.simg
+          ls -l ios16-root.img ios16-root.simg
+          sha256sum ios16-root.simg | tee SHA256SUMS.txt
+          gzip -6 ios16-root.simg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios16-root-simg
+          path: |
+            ios16-root.simg.gz
+            SHA256SUMS.txt
+          retention-days: 5
+          if-no-files-found: error
