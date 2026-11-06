@@ -29,8 +29,13 @@ def save(path, data):
 
 
 def main():
-    root = sys.argv[1]
-    path = os.path.join(root, 'private/var/preferences/SystemConfiguration/preferences.plist')
+    args = sys.argv[1:]
+    if args and args[0] == '--file':
+        # live mode: operate on a pulled preferences.plist copy directly
+        path = args[1]
+    else:
+        root = args[0]
+        path = os.path.join(root, 'private/var/preferences/SystemConfiguration/preferences.plist')
     if os.path.exists(path):
         prefs = load(path)
     else:
