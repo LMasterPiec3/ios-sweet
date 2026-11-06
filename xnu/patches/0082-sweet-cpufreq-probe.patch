@@ -1,0 +1,135 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index c7632da..30e735c 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_gpu.c			standard
++bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+new file mode 100644
+index 0000000..a962cfa
+--- /dev/null
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -0,0 +1,97 @@
++/*
++ * Read-only SWEET CPU clock probe: dump the SM7150 cpufreq-hw (OSM) register
++ * windows that ABL leaves programmed. Each cluster has a frequency domain
++ * (A55 @ 0x17d43000, A76 @ 0x17d46000); the LUT describes the frequency plan
++ * and PERF_STATE the active vote, so the dump shows whether the cores run
++ * their advertised clocks (A55 1.8 GHz / A76 2.3 GHz) without an OS-side
++ * cpufreq driver. No MMIO writes: cpufreq_hw is an always-on block.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++void sweet_cpufreq_probe(void);
++
++#define SWEET_CLK_D0_PA     0x17d43000u
++#define SWEET_CLK_D1_PA     0x17d46000u
++#define SWEET_CLK_SIZE      0x1000u
++
++/* Offsets within one OSM frequency domain (mainline qcom-cpufreq-hw). */
++#define OSM_ENABLE          0x000u
++#define OSM_LUT             0x110u
++#define OSM_LUT_ROWS        40u
++#define OSM_PERF_STATE      0x320u
++#define OSM_PERF_STATE_END  0x34cu
++
++static vm_offset_t sweet_clk_dom[2];
++static int sweet_clk_probe_attempted;
++
++static uint32_t
++sweet_clk_read(int dom, uint32_t off)
++{
++	uint32_t value = *(volatile uint32_t *)(sweet_clk_dom[dom] + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return value;
++}
++
++static void
++sweet_clk_dump(int dom, uint32_t pa)
++{
++	uint32_t off, r, khz;
++	int i;
++
++	printf("SWEET CLK: domain%d @%#x enable=%#x\n",
++	    dom, pa, sweet_clk_read(dom, OSM_ENABLE));
++	for (i = 0; i < (int)OSM_LUT_ROWS; i++) {
++		r = sweet_clk_read(dom, OSM_LUT + i * 4);
++		if (r == 0) {
++			continue;
++		}
++		khz = r & 0x3fffffffu;
++		if (khz >= 300000 && khz <= 2400000) {
++			printf("SWEET CLK: d%d LUT[%d] = %u kHz\n", dom, i, khz);
++		} else {
++			printf("SWEET CLK: d%d LUT[%d] = %#x (l_val=%u volt=%u src=%u)\n",
++			    dom, i, r, r & 0xffu, (r >> 12) & 0xfffu, (r >> 30) & 0x3u);
++		}
++	}
++	for (off = OSM_PERF_STATE; off < OSM_PERF_STATE_END; off += 4) {
++		r = sweet_clk_read(dom, off);
++		if (r != 0) {
++			printf("SWEET CLK: d%d [%#x] = %#x\n", dom, off, r);
++		}
++	}
++}
++
++void
++sweet_cpufreq_probe(void)
++{
++	int enabled = 0;
++
++	if (sweet_clk_probe_attempted) {
++		return;
++	}
++	sweet_clk_probe_attempted = 1;
++	(void)PE_parse_boot_argn("sweetclk", &enabled, sizeof(enabled));
++	if (enabled != 1) {
++		printf("SWEET CLK: read-only cpufreq probe disabled; use sweetclk=1\n");
++		return;
++	}
++
++	sweet_clk_dom[0] = ml_io_map(SWEET_CLK_D0_PA, SWEET_CLK_SIZE);
++	sweet_clk_dom[1] = ml_io_map(SWEET_CLK_D1_PA, SWEET_CLK_SIZE);
++	if (sweet_clk_dom[0] == 0 || sweet_clk_dom[1] == 0) {
++		printf("SWEET CLK: ml_io_map failed for the OSM domains\n");
++		return;
++	}
++	printf("SWEET CLK: SM7150 cpufreq-hw read-only probe (no MMIO writes)\n");
++	sweet_clk_dump(0, SWEET_CLK_D0_PA);
++	sweet_clk_dump(1, SWEET_CLK_D1_PA);
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++++ b/bsd/dev/sweet_ufs.c
++extern void sweet_cpufreq_probe(void);
++	sweet_cpufreq_probe();
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index f6aedc4..4d3a2a2 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_gpu_probe(void);
++extern void sweet_cpufreq_probe(void);
+ extern void sweet_usb_probe(void);
+ 
+ #define REG_CAP         0x00
+@@ -661,6 +662,7 @@ sweet_ufs_init(void)
+ 	sweet_keys_init();
+ 	sweet_touch_init();
+ 	sweet_gpu_probe();
++	sweet_cpufreq_probe();
+ 	sweet_usb_probe();
+ 	return 0;
+ }
